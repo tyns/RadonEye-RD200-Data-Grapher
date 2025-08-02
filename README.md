@@ -40,6 +40,9 @@ If you prefer to run the Python script (`radon_plot.py`), follow these steps:
      ```
    - This software assumes your data files are stored in default exported filename convention (e.g., `IE08RE000863_20250731 164749.txt`) from the RadonEye RD200.  The software uses information from the filename to make assumption for plotting the radon graph. 
 
+### Navigation
+- When using the Selection Magnification, `Left Mouse Button` zooms in, `Right Mouse Button` zooms out
+
 ### Notes
 - Ensure your RadonEye data files (e.g., `IE08RE000863_20250731 164749.txt`) are accessible to the script.
 - For precompiled versions, check the Releases page for updates. Contributions or issues can be reported via GitHub.
