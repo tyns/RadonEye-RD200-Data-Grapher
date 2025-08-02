@@ -16,9 +16,10 @@ If you prefer to run the Python script (`radon_plot.py`), follow these steps:
 - **Required Libraries**:
   - `matplotlib` (for plotting)
   - `numpy` (for data handling)
+  - `PyQt5` (for GUI support)
   - Install them via pip:
     ```bash
-    pip3 install matplotlib numpy
+    pip3 install matplotlib numpy PyQt5
     ```
   - Note: Check `radon_plot.py` for any additional dependencies and install them similarly (e.g., `pip3 install <library>`).
 
