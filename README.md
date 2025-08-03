@@ -2,6 +2,8 @@
 
 This project provides a tool to graph data from the RadonEye RD200 device. It can be run as a precompiled executable or as a Python script.
 
+This program tries to fill the void of being able to understand the data points exported from your RD200 Monitor.  It will load the exported data points text file from your RD200 and then display them in a graph with date and time stamps.  This allows you to make sense of the data from your RD200 device.  You will no longer be guessing what year, month, day, hours data points were taken. Further, you will be able to zoom in and analyze any range of data points you require.
+
 ## Precompiled Versions
 - **Mac**: Download `radon_plot.app` from the [Releases](https://github.com/tyns/RadonEye-RD200-Data-Grapher/releases) page (if available).
   - Double-click the `.app` file to run. No installation required.
