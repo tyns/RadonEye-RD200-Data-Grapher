@@ -7,15 +7,53 @@ import matplotlib.colors as mcolors
 import matplotlib.dates as mdates
 import numpy as np
 import datetime
+import os
+import re
 from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
 from matplotlib.collections import LineCollection
-from PyQt5.QtWidgets import QFileDialog, QApplication, QMainWindow, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QFileDialog, QApplication, QMainWindow, QVBoxLayout, QWidget, QInputDialog, QMessageBox
 from matplotlib.widgets import Button
 from matplotlib.patches import Patch
 import sys
 
 # Create Qt application
 app = QApplication(sys.argv)
+
+
+def parse_interval_to_timedelta(interval_str):
+    """Parse strings like '1 hour', '5 min', '30 minutes' into a timedelta."""
+    if not interval_str:
+        return datetime.timedelta(hours=1)
+    match = re.match(r'\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]+)', interval_str)
+    if not match:
+        return datetime.timedelta(hours=1)
+    amount = float(match.group(1))
+    unit = match.group(2).lower()
+    if unit.startswith('h'):
+        return datetime.timedelta(hours=amount)
+    if unit.startswith('m'):
+        return datetime.timedelta(minutes=amount)
+    if unit.startswith('s'):
+        return datetime.timedelta(seconds=amount)
+    if unit.startswith('d'):
+        return datetime.timedelta(days=amount)
+    return datetime.timedelta(hours=1)
+
+
+def normalize_unit(raw_unit):
+    """RD200 exports sometimes use a proper superscript 3 (Bq/m³) and
+    sometimes a plain '3' (Bq/m3). Normalize so downstream logic
+    (which keys off exact strings) always gets one of the two
+    recognized forms."""
+    if not raw_unit:
+        return "Bq/m3"
+    cleaned = raw_unit.strip()
+    if cleaned.lower().startswith("bq/m"):
+        return "Bq/m3"
+    if cleaned.lower().startswith("pci/l"):
+        return "pCi/L"
+    return cleaned
+
 
 # Create main window
 class MainWindow(QMainWindow):
@@ -28,68 +66,128 @@ class MainWindow(QMainWindow):
             self,
             "Select RadonEye RD200 Data File",
             "",
-            "Text files (*.txt);;All files (*.*)"
+            "RadonEye Data Files (*.txt *.csv);;Text files (*.txt);;CSV files (*.csv);;All files (*.*)"
         )
 
         if not filename:
             print("No file selected. Exiting.")
             sys.exit(1)
 
-        # Extract date and hour from filename
-        date_str = filename.split('_')[-1][:8]
-        year = int(date_str[:4])
-        month = int(date_str[4:6])
-        day = int(date_str[6:8])
-        time_str = filename.split()[-1] if ' ' in filename else filename.split('_')[-1][8:14]
-        hour = int(time_str[:2])
-        end_datetime = datetime.datetime(year, month, day, hour, 0, 0)
+        # Extract serial number from filename (first underscore-separated token)
+        base_name = os.path.basename(filename)
+        serial_number = base_name.split('_')[0] if '_' in base_name else base_name
 
-        # Extract serial number from filename
-        serial_number = filename.split('_')[0].split('/')[-1]
+        # Try to extract an end datetime from the filename using the classic
+        # RadonEye export convention: SERIAL_YYYYMMDD HHMMSS.txt
+        end_datetime = None
+        date_match = re.search(r'(\d{8})[ _](\d{6})', base_name)
+        if date_match:
+            try:
+                date_str, time_str = date_match.group(1), date_match.group(2)
+                end_datetime = datetime.datetime(
+                    int(date_str[0:4]), int(date_str[4:6]), int(date_str[6:8]),
+                    int(time_str[0:2]), int(time_str[2:4]), int(time_str[4:6])
+                )
+            except ValueError:
+                end_datetime = None
+
+        # Newer exports (e.g. "SERIAL_LogData_2.txt") don't embed a date at
+        # all, so fall back to the file's last-modified time and let the
+        # user confirm/correct it.
+        if end_datetime is None:
+            try:
+                mtime = os.path.getmtime(filename)
+                default_dt = datetime.datetime.fromtimestamp(mtime)
+            except OSError:
+                default_dt = datetime.datetime.now()
+
+            default_str = default_dt.strftime('%Y-%m-%d %H:%M:%S')
+            text, ok = QInputDialog.getText(
+                self,
+                "Confirm End Date/Time",
+                "This file's name doesn't contain a timestamp, so the date/time\n"
+                "of the LAST data point can't be determined automatically.\n\n"
+                "Enter it below (defaults to the file's last-modified time):\n"
+                "Format: YYYY-MM-DD HH:MM:SS",
+                text=default_str
+            )
+            if not ok:
+                print("No end date/time provided. Exiting.")
+                sys.exit(1)
+            try:
+                end_datetime = datetime.datetime.strptime(text.strip(), '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                QMessageBox.warning(self, "Invalid Date", "Couldn't parse that date/time. Using file's last-modified time instead.")
+                end_datetime = default_dt
+
         print(f"Serial number extracted: {serial_number}")
 
-        # Load data and detect unit
+        # Load data and detect unit/format
         self.radon_levels = []
         data_count = 0
-        total_points = 4391
+        total_points = None
         unit = "Bq/m3"
+        interval_delta = datetime.timedelta(hours=1)
+
         try:
-            with open(filename, 'r', encoding='utf-8') as file:
+            with open(filename, 'r', encoding='utf-8-sig') as file:
                 print("Loading data from file...")
-                for line_number, line in enumerate(file, 1):
-                    line = line.strip()
+                for line_number, raw_line in enumerate(file, 1):
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+
+                    # Header lines look like "Key:,Value" or legacy "Key: Value"
                     if line.startswith("Unit:"):
-                        unit = line.split("Unit:")[1].strip()
+                        unit = normalize_unit(line.split(':', 1)[1].lstrip(',').strip())
                         print(f"Unit detected: {unit}")
                         continue
-                    if line.startswith("Data No:"):
-                        total_points = int(line.split()[-1])
+                    if line.startswith("Total # of Data:"):
+                        total_points = int(line.split(':', 1)[1].lstrip(',').strip())
                         print(f"Total data points set to: {total_points}")
                         continue
-                    if any(line.startswith(f"{i})") for i in range(1, total_points + 1)) and data_count < total_points:
+                    if line.startswith("Data No:"):
+                        # legacy exports put the count here instead
+                        rest = line.split(':', 1)[1].lstrip(',').strip()
+                        if rest.isdigit():
+                            total_points = int(rest)
+                            print(f"Total data points set to: {total_points}")
+                        continue
+                    if line.startswith(("Model Name:", "S/N:", "Alarm Threshold:", "Interval:")):
+                        if line.startswith("Interval:"):
+                            interval_delta = parse_interval_to_timedelta(line.split(':', 1)[1].lstrip(',').strip())
+                            print(f"Interval detected: {interval_delta}")
+                        continue
+
+                    # Data lines: current export is "index,value"; legacy
+                    # export was "index) value [unit]"
+                    m = re.match(r'^(\d+)\s*[,)]\s*(-?\d+(?:\.\d+)?)', line)
+                    if m:
                         try:
-                            value_str = line.split(')', 1)[1].strip()
-                            value = float(value_str.split()[0])
+                            value = float(m.group(2))
                             self.radon_levels.append(value)
                             data_count += 1
                             if data_count % 1000 == 0:
                                 print(f"Parsed {data_count} values...")
-                        except (ValueError, IndexError) as e:
+                        except ValueError as e:
                             print(f"Failed to parse line {line_number}: '{line}' - Error: {e}")
-                            continue
-                    if data_count >= total_points:
-                        print(f"Loaded {data_count} data points.")
-                        break
+                        continue
+
+                print(f"Loaded {data_count} data points.")
         except Exception as e:
             print(f"Error reading file: {e}")
             sys.exit(1)
 
-        if len(self.radon_levels) != total_points:
+        if total_points is not None and len(self.radon_levels) != total_points:
             print(f"Warning: Expected {total_points} data points, found {len(self.radon_levels)}. Check file format.")
 
+        if len(self.radon_levels) == 0:
+            QMessageBox.critical(self, "No Data Found", "Couldn't find any data points in this file. Please check the file format.")
+            sys.exit(1)
+
         self.radon_levels = np.array(self.radon_levels)
-        start_datetime = end_datetime - datetime.timedelta(hours=len(self.radon_levels) - 1)
-        self.timestamps = np.array([start_datetime + datetime.timedelta(hours=i) for i in range(len(self.radon_levels))])
+        start_datetime = end_datetime - interval_delta * (len(self.radon_levels) - 1)
+        self.timestamps = np.array([start_datetime + interval_delta * i for i in range(len(self.radon_levels))])
         # Convert timestamps to Matplotlib date numbers
         self.timestamp_nums = mdates.date2num(self.timestamps)
         print(f"Start datetime: {start_datetime}, End datetime: {end_datetime}")
@@ -273,8 +371,43 @@ class MainWindow(QMainWindow):
         # Enable MOVE tool (pan) by default
         self.toolbar.pan()
 
+        # Enable mouse scroll wheel zoom (zooms toward the cursor position)
+        self.canvas.mpl_connect('scroll_event', self.on_scroll)
+
         # Ensure the canvas is updated
         self.canvas.draw()
+
+    def on_scroll(self, event):
+        # Only zoom when the cursor is over the plot area
+        if event.inaxes != self.ax or event.xdata is None:
+            return
+
+        ax = self.ax
+        xlim = ax.get_xlim()
+        xdata = event.xdata
+
+        # macOS "natural scrolling" (default for trackpads/Magic Mouse)
+        # reverses what 'up'/'down' feel like versus a traditional mouse
+        # wheel. Set to False if scrolling ever feels backwards again
+        # (e.g. after toggling natural scrolling off, or on a mouse that
+        # doesn't follow it).
+        NATURAL_SCROLLING = True
+
+        if event.button == 'up':
+            scale_factor = 1.1 if NATURAL_SCROLLING else 0.9
+        elif event.button == 'down':
+            scale_factor = 0.9 if NATURAL_SCROLLING else 1.1
+        else:
+            return
+
+        # Keep the point under the cursor fixed while zooming, same as most
+        # map/graphing apps, rather than always zooming on the center
+        old_width = xlim[1] - xlim[0]
+        new_width = old_width * scale_factor
+        rel = (xdata - xlim[0]) / old_width if old_width != 0 else 0.5
+        new_xlim = (xdata - new_width * rel, xdata + new_width * (1 - rel))
+        ax.set_xlim(new_xlim)
+        self.canvas.draw_idle()
 
     def zoom_in(self, event):
         # Zoom in by 10% centered on the current view, only on x-axis
