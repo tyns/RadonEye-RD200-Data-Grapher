@@ -1,8 +1,0 @@
-dist/
-build/
-*.spec
-__pycache__/
-*.pyc
-work/
-.DS_Store
-*.txt
